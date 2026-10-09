@@ -2,6 +2,7 @@
 
 **Dashboard:** [Link para o Power BI interativo]
 
+[![CI](https://github.com/MatheusCavalcanteF/datasus-etl-baixada-santista/actions/workflows/ci.yml/badge.svg)](https://github.com/MatheusCavalcanteF/datasus-etl-baixada-santista/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![pandas](https://img.shields.io/badge/pandas-3.0-150458?logo=pandas&logoColor=white)
 ![Apache Arrow](https://img.shields.io/badge/Parquet-pyarrow-D22128?logo=apache&logoColor=white)
@@ -174,8 +175,8 @@ A solução está na camada semântica: a medida DAX `Status do Mês` classifica
 Requisitos: Python 3.12+ (testado em Python 3.14 no Windows 11; o CI roda os testes em Python 3.12 no Ubuntu) e acesso ao FTP do DATASUS.
 
 ```bash
-git clone [URL do repositório]
-cd Dados-Hospitalares-SUS
+git clone https://github.com/MatheusCavalcanteF/datasus-etl-baixada-santista.git
+cd datasus-etl-baixada-santista
 
 python -m venv .venv
 .venv\Scripts\activate          # Windows · no Linux/macOS: source .venv/bin/activate
