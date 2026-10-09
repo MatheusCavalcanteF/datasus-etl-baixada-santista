@@ -1,0 +1,25 @@
+# Dados gerados pelo pipeline (raw, converted, trusted, database): ~630 MB,
+# reproduzíveis com python -m src.extract / transform / load
+data/
+
+# Execução
+logs/
+*.part
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# Power BI: o .pbix carrega os dados importados e o caminho local da conexão ODBC.
+# As medidas em powerbi/dax_measures.md são versionadas porque o README aponta para elas.
+*.pbix
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
