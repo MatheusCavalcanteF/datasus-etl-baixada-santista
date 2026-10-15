@@ -214,6 +214,8 @@ pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
 │   └── test_load.py      # média de permanência no banco, idempotência, rollback
 ├── powerbi/
 │   └── dax_measures.md   # medidas DAX, configuração do modelo e valores de referência
+├── docs/
+│   └── SECURITY.md       # como reportar vulnerabilidades; dados e LGPD
 ├── data/                 # gerado pelo pipeline (fora do git)
 ├── logs/                 # gerado pelo pipeline (fora do git)
 ├── pytest.ini
