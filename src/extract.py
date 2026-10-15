@@ -54,6 +54,10 @@ class IncompleteDownloadError(Exception):
     """O arquivo baixado tem tamanho diferente do informado pelo FTP."""
 
 
+class ConversionError(Exception):
+    """O Parquet gravado não tem as mesmas linhas lidas do .dbf."""
+
+
 class RemoteDirectoryError(Exception):
     """O diretório esperado não existe no FTP (o DATASUS reorganizou as pastas?)."""
 
@@ -242,6 +246,15 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
     O .dbf intermediário (~9x maior que o .dbc) é apagado ao final. O Parquet
     guarda nos metadados o tamanho e a data do .dbc de origem, que servem para
     pular a conversão quando nada mudou.
+
+    Como o FTP não tem TLS nem hash publicado, a conferência de tamanho do
+    download não basta: o read_dbf valida a estrutura do .dbf descompactado
+    (registros declarados no cabeçalho x tamanho do arquivo) e o Parquet só
+    substitui o anterior se tiver o mesmo número de linhas lidas.
+
+    Raises:
+        DBFFormatError: o .dbf descompactado não bate com o próprio cabeçalho.
+        ConversionError: o Parquet gravado tem número de linhas diferente do lido.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     parquet_path = dest_dir / f"{dbc_path.stem}.parquet"
@@ -263,6 +276,9 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
         converted_at = datetime.now(timezone.utc).isoformat(timespec="seconds").encode()
         metadata = {**(table.schema.metadata or {}), **source, b"converted_at_utc": converted_at}
         pq.write_table(table.replace_schema_metadata(metadata), part_path)
+        written = pq.read_metadata(part_path).num_rows
+        if written != len(df):
+            raise ConversionError(f"{parquet_path.name}: gravadas {written:,} de {len(df):,} linhas lidas do .dbf")
         part_path.replace(parquet_path)
     finally:
         dbf_path.unlink(missing_ok=True)
