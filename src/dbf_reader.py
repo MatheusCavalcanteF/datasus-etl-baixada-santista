@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 _HEADER_PREFIX_SIZE = 32
 _FIELD_DESCRIPTOR_SIZE = 32
 _HEADER_TERMINATOR = 0x0D
+_EOF_MARKER = 0x1A  # opcional no dBase; os RD do DATASUS terminam sem ele
+_ACTIVE_FLAG = ord(" ")
 _DELETED_FLAG = ord("*")
 _MAX_INT64_DIGITS = 18
 
@@ -95,8 +97,14 @@ def read_dbf(
 
     Registros marcados como excluídos são descartados.
 
+    O FTP do DATASUS não publica hash dos arquivos, então a integridade é conferida
+    pela estrutura: o arquivo precisa ter exatamente os registros que o cabeçalho
+    declara (no máximo seguidos do byte 0x1A) e todo registro precisa começar com
+    uma marca de exclusão válida, o que denuncia registros desalinhados.
+
     Raises:
-        DBFFormatError: arquivo menor que o declarado no cabeçalho ou campos inconsistentes.
+        DBFFormatError: tamanho do arquivo diferente do declarado no cabeçalho,
+            registros desalinhados ou campos inconsistentes.
         KeyError: alguma coluna pedida não existe no arquivo.
     """
     raw = np.fromfile(path, dtype=np.uint8)
@@ -111,6 +119,12 @@ def read_dbf(
         raise DBFFormatError(
             f"{path.name}: truncado ({raw.size:,} bytes; o cabeçalho declara {data_end:,})"
         )
+    trailing = raw[data_end:]
+    if trailing.size > 1 or (trailing.size == 1 and trailing[0] != _EOF_MARKER):
+        # Bytes a mais significam registros fora da contagem do cabeçalho, que seriam perdidos
+        raise DBFFormatError(
+            f"{path.name}: {trailing.size:,} byte(s) além dos {n_records:,} registros declarados no cabeçalho"
+        )
 
     if columns is not None:
         wanted = set(columns)
@@ -121,6 +135,11 @@ def read_dbf(
 
     records = raw[header_len:data_end].reshape(n_records, record_len)
     deleted = records[:, 0] == _DELETED_FLAG
+    misaligned = int((~deleted & (records[:, 0] != _ACTIVE_FLAG)).sum())
+    if misaligned:
+        raise DBFFormatError(
+            f"{path.name}: {misaligned:,} registro(s) sem marca de exclusão válida (arquivo corrompido?)"
+        )
     if deleted.any():
         logger.info("%s: %d registro(s) marcado(s) como excluído(s) descartado(s)", path.name, deleted.sum())
         records = records[~deleted]

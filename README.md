@@ -184,7 +184,7 @@ python -m src.extract           # baixa e converte (padrão: ano anterior + ano 
 python -m src.transform         # recorte da Baixada Santista e regras de negócio
 python -m src.load              # Star Schema em data/database/hospital_data.db
 
-pytest tests/                   # 19 testes, ~1 s, sem acesso à rede
+pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
 ```
 
 - Rode sempre a partir da raiz, com `python -m`.
@@ -209,6 +209,7 @@ pytest tests/                   # 19 testes, ~1 s, sem acesso à rede
 │   └── load.py           # Star Schema no SQLite, carga atômica
 ├── tests/
 │   ├── conftest.py       # AIHs sintéticas no layout do DATASUS
+│   ├── test_dbf_reader.py # validação estrutural do .dbf descompactado
 │   ├── test_transform.py # chave única, filtro geográfico, dias de permanência
 │   └── test_load.py      # média de permanência no banco, idempotência, rollback
 ├── powerbi/
@@ -221,7 +222,7 @@ pytest tests/                   # 19 testes, ~1 s, sem acesso à rede
 
 ## Testes
 
-`pytest tests/` roda 19 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o transform e o load de verdade, em pastas temporárias, sem dados da rede:
+`pytest tests/` roda 28 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o leitor DBF, a conversão para Parquet, o transform e o load de verdade, em pastas temporárias, sem dados da rede:
 
 - **Chave única:** fatias de longa permanência na mesma competência são mantidas e somadas; cópias exatas bloqueiam a gravação. Os testes usam os números de AIH reais que motivaram a chave.
 - **Filtro geográfico:** só ficam hospitais dos 9 municípios. O filtro é pelo hospital, não pela residência, e rejeita códigos com dígito verificador, truncados ou vazios.
@@ -231,6 +232,7 @@ pytest tests/                   # 19 testes, ~1 s, sem acesso à rede
   - datas inválidas ou com saída antes da entrada descartam a AIH.
 - **Média de permanência no banco:** a fórmula da medida DAX dá 24,25 dias num caso calculado à mão, contra 16,2 dias da média simples por linha. Um recorte sem internações devolve nulo, sem erro.
 - **Carga atômica:** a carga é idempotente, e uma falha no meio dela (FK órfã ou validação) mantém o banco anterior.
+- **Integridade do `.dbf`:** arquivo truncado, cabeçalho com menos registros que o arquivo, bytes a mais no final e registro desalinhado são rejeitados, e um `.dbf` inconsistente não substitui o Parquet anterior.
 
 A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, três bugs no código: a chave antiga, o filtro pela residência e a permanência nula virando zero. Os testes certos falharam nos três casos.
 
@@ -241,7 +243,8 @@ A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, 
 - **Os últimos 3 meses são preliminares** por natureza do SIH. O painel sinaliza isso em vez de esconder.
 - **Taxa de ocupação:** ainda não implementada. Depende dos leitos SUS do CNES e só é possível como estimativa.
 - **Nomes de hospitais e descrições de CID:** as fontes estão mapeadas e testadas (API de dados abertos do CNES e tabela CID-10 do DATASUS), mas ainda não foram integradas.
-- **Cobertura de testes:** transform e load estão cobertos. O extract (FTP, novas tentativas, cache) e o leitor DBF foram validados manualmente durante o desenvolvimento, mas ainda não têm testes automatizados.
+- **Integridade do download:** o FTP do DATASUS não tem TLS nem publica hash dos arquivos, então não há como provar que o `.dbc` recebido é o publicado. O extract confere o tamanho informado pelo FTP e, depois de descompactar, a estrutura do `.dbf`: o arquivo precisa ter exatamente os registros declarados no cabeçalho, todo registro precisa estar alinhado, e o Parquet só é gravado com o mesmo número de linhas. Isso pega download truncado e arquivo corrompido, mas não um arquivo adulterado de forma consistente no caminho.
+- **Cobertura de testes:** transform, load, leitor DBF e conversão para Parquet estão cobertos. A parte de rede do extract (FTP, novas tentativas, cache) foi validada manualmente durante o desenvolvimento, mas ainda não tem testes automatizados.
 
 ## Fonte dos dados
 
