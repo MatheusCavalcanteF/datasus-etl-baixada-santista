@@ -1,7 +1,5 @@
 # Painel de Internações SUS — Baixada Santista
 
-**Dashboard:** [Link para o Power BI interativo]
-
 [![CI](https://github.com/MatheusCavalcanteF/datasus-etl-baixada-santista/actions/workflows/ci.yml/badge.svg)](https://github.com/MatheusCavalcanteF/datasus-etl-baixada-santista/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![pandas](https://img.shields.io/badge/pandas-3.0-150458?logo=pandas&logoColor=white)
