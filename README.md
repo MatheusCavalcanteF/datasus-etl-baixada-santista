@@ -43,7 +43,7 @@ flowchart LR
 
 | Etapa | Tecnologia | Responsabilidade |
 |---|---|---|
-| **Extract** (`src/extract.py`) | `ftplib`, `datasus-dbc`, `numpy`, `pyarrow` | Download incremental com novas tentativas; conversão `.dbc` → `.dbf` → Parquet com metadados de origem |
+| **Extract** (`src/extract.py`) | `ftplib`, `datasus-dbc`, `numpy`, `pyarrow` | Download incremental com novas tentativas; conversão `.dbc` → `.dbf` → Parquet com metadados de origem, já sem CEP, data de nascimento e CPF do gestor |
 | **Transform** (`src/transform.py`) | `pandas`, `pyarrow` | Recorte geográfico, tipagem, decodificação pelas tabelas oficiais do TabWin, regras de nulos e contrato de dados |
 | **Load** (`src/load.py`) | `sqlite3`, `pandas` | Star Schema com PK, FK, CHECK e UNIQUE, carga atômica e conciliação antes do commit |
 | **Visualização** | Power BI + DAX | Medidas com regra de negócio do SUS (`powerbi/dax_measures.md`) |
@@ -184,7 +184,7 @@ python -m src.extract           # baixa e converte (padrão: ano anterior + ano 
 python -m src.transform         # recorte da Baixada Santista e regras de negócio
 python -m src.load              # Star Schema em data/database/hospital_data.db
 
-pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
+pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
 ```
 
 - Rode sempre a partir da raiz, com `python -m`.
@@ -209,7 +209,7 @@ pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
 │   └── load.py           # Star Schema no SQLite, carga atômica
 ├── tests/
 │   ├── conftest.py       # AIHs sintéticas no layout do DATASUS
-│   ├── test_dbf_reader.py # validação estrutural do .dbf descompactado
+│   ├── test_dbf_reader.py # validação do .dbf e minimização dos campos pessoais
 │   ├── test_transform.py # chave única, filtro geográfico, dias de permanência
 │   └── test_load.py      # média de permanência no banco, idempotência, rollback
 ├── powerbi/
@@ -224,7 +224,7 @@ pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
 
 ## Testes
 
-`pytest tests/` roda 28 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o leitor DBF, a conversão para Parquet, o transform e o load de verdade, em pastas temporárias, sem dados da rede:
+`pytest tests/` roda 30 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o leitor DBF, a conversão para Parquet, o transform e o load de verdade, em pastas temporárias, sem dados da rede:
 
 - **Chave única:** fatias de longa permanência na mesma competência são mantidas e somadas; cópias exatas bloqueiam a gravação. Os testes usam os números de AIH reais que motivaram a chave.
 - **Filtro geográfico:** só ficam hospitais dos 9 municípios. O filtro é pelo hospital, não pela residência, e rejeita códigos com dígito verificador, truncados ou vazios.
@@ -235,6 +235,7 @@ pytest tests/                   # 28 testes, ~1 s, sem acesso à rede
 - **Média de permanência no banco:** a fórmula da medida DAX dá 24,25 dias num caso calculado à mão, contra 16,2 dias da média simples por linha. Um recorte sem internações devolve nulo, sem erro.
 - **Carga atômica:** a carga é idempotente, e uma falha no meio dela (FK órfã ou validação) mantém o banco anterior.
 - **Integridade do `.dbf`:** arquivo truncado, cabeçalho com menos registros que o arquivo, bytes a mais no final e registro desalinhado são rejeitados, e um `.dbf` inconsistente não substitui o Parquet anterior.
+- **Minimização de dados pessoais:** CEP, data de nascimento e CPF do gestor não chegam ao Parquet convertido, e um Parquet gravado antes dessa regra é reconvertido sozinho.
 
 A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, três bugs no código: a chave antiga, o filtro pela residência e a permanência nula virando zero. Os testes certos falharam nos três casos.
 
@@ -250,7 +251,7 @@ A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, 
 
 ## Fonte dos dados
 
-Ministério da Saúde / DATASUS. Sistema de Informações Hospitalares do SUS (SIH/SUS), arquivos de AIH Reduzida (`RD`), em `ftp.datasus.gov.br/dissemin/publicos/SIHSUS`. Os dados são públicos e anonimizados. A decodificação usa as tabelas auxiliares do TabWin (`TAB_SIH.zip`).
+Ministério da Saúde / DATASUS. Sistema de Informações Hospitalares do SUS (SIH/SUS), arquivos de AIH Reduzida (`RD`), em `ftp.datasus.gov.br/dissemin/publicos/SIHSUS`. Os dados são públicos e não trazem nome nem CPF do paciente. O pipeline descarta na conversão os campos pessoais que o arquivo publica (CEP de residência, data de nascimento e CPF do gestor), que nenhuma análise usa; detalhes em [`docs/SECURITY.md`](docs/SECURITY.md). A decodificação usa as tabelas auxiliares do TabWin (`TAB_SIH.zip`).
 
 ## Autor
 
