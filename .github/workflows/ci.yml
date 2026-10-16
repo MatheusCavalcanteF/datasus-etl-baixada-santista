@@ -13,7 +13,7 @@ jobs:
   testes:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # 3.12 é o mínimo do numpy 2.5 e a última versão com wheel do datasus-dbc para Linux.
       # No 3.14 (ambiente local) o datasus-dbc compila do código-fonte em Rust.
