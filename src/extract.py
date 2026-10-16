@@ -1,8 +1,9 @@
 """Extração da AIH Reduzida (RD) do SIH/SUS a partir do FTP do DATASUS.
 
 Baixa os arquivos RD{UF}{AAMM}.dbc para data/raw/ e converte cada um para
-Parquet em data/converted/, com todas as colunas e linhas originais. O recorte
-da Baixada Santista fica para o transform.
+Parquet em data/converted/, com todas as linhas e todas as colunas originais,
+menos os campos pessoais de PERSONAL_DATA_COLUMNS. O recorte da Baixada
+Santista fica para o transform.
 
 O DATASUS republica os últimos ~12 meses todo mês. Por isso cada arquivo só é
 baixado de novo quando o tamanho ou a data de modificação no FTP mudam, e só é
@@ -48,6 +49,14 @@ BACKOFF_BASE_S = 5  # espera 5s, 10s e 20s entre as tentativas
 DBF_ENCODING = "latin-1"
 
 DEFAULT_UF = "SP"
+
+# Minimização (LGPD): campos pessoais que o RD publica e nenhuma etapa usa. Saem já
+# na conversão, então não chegam ao Parquet. A idade vem de IDADE/COD_IDADE, não de NASC.
+PERSONAL_DATA_COLUMNS = (
+    "CEP",  # CEP de residência do paciente
+    "NASC",  # data de nascimento do paciente
+    "GESTOR_CPF",  # CPF do gestor que autorizou a AIH
+)
 
 
 class IncompleteDownloadError(Exception):
@@ -247,6 +256,10 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
     guarda nos metadados o tamanho e a data do .dbc de origem, que servem para
     pular a conversão quando nada mudou.
 
+    As colunas de PERSONAL_DATA_COLUMNS ficam fora do Parquet. A lista também
+    vai para os metadados, então um Parquet gravado com outra lista (ou antes
+    dela existir) é reconvertido na execução seguinte.
+
     Como o FTP não tem TLS nem hash publicado, a conferência de tamanho do
     download não basta: o read_dbf valida a estrutura do .dbf descompactado
     (registros declarados no cabeçalho x tamanho do arquivo) e o Parquet só
@@ -258,7 +271,10 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     parquet_path = dest_dir / f"{dbc_path.stem}.parquet"
-    source = _source_metadata(dbc_path)
+    source = {
+        **_source_metadata(dbc_path),
+        b"dropped_personal_columns": ",".join(PERSONAL_DATA_COLUMNS).encode(),
+    }
 
     if not force and _parquet_is_current(parquet_path, source):
         logger.info("%s já corresponde ao .dbc atual; conversão ignorada", parquet_path.name)
@@ -271,6 +287,9 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
     try:
         datasus_dbc.decompress(str(dbc_path), str(dbf_path))
         df = read_dbf(dbf_path, encoding=DBF_ENCODING)
+        dropped = [col for col in PERSONAL_DATA_COLUMNS if col in df.columns]
+        df = df.drop(columns=dropped)
+        logger.info("%s: campos pessoais descartados: %s", dbc_path.name, ", ".join(dropped) or "nenhum")
 
         table = pa.Table.from_pandas(df, preserve_index=False)
         converted_at = datetime.now(timezone.utc).isoformat(timespec="seconds").encode()

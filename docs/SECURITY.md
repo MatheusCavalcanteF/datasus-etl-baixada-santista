@@ -20,14 +20,16 @@ Fora do escopo: a infraestrutura do DATASUS (FTP sem TLS, ausência de hash publ
 
 **Fonte.** O pipeline usa só os microdados públicos do SIH/SUS (AIH Reduzida, arquivos `RD`), publicados pelo Ministério da Saúde no FTP do DATASUS. Os arquivos não trazem nome, CPF nem endereço do paciente. Trazem, como publicados, o CEP de residência e a data de nascimento, além do CPF do gestor que autorizou a AIH (campo `GESTOR_CPF`).
 
+**Minimização.** Nenhuma etapa usa esses três campos (a idade vem de `IDADE`/`COD_IDADE`), então o extract descarta `CEP`, `NASC` e `GESTOR_CPF` já na conversão para Parquet (`PERSONAL_DATA_COLUMNS` em `src/extract.py`). A lista fica gravada nos metadados de cada Parquet, e um arquivo convertido com outra lista é refeito na execução seguinte. Um teste garante que as três colunas não chegam ao `data/converted`.
+
 **O que fica fora do git.** Nenhum dado, bruto ou processado, é versionado: a pasta `data/`, os logs e os arquivos `*.pbix` (que carregam os dados importados) estão no `.gitignore`. Os testes usam só AIHs sintéticas.
 
 **O que o pipeline grava em disco**, sempre dentro do projeto:
 
 | Caminho | Conteúdo | Campos sensíveis |
 |---|---|---|
-| `data/raw/RD{UF}{AAMM}.dbc` | arquivo original do DATASUS, SP inteiro | todos os publicados, inclusive CEP, nascimento e `GESTOR_CPF` |
-| `data/converted/RD{UF}{AAMM}.parquet` | mesmo conteúdo do `.dbc`, todas as linhas e colunas | idem |
+| `data/raw/RD{UF}{AAMM}.dbc` | arquivo original do DATASUS, SP inteiro, guardado para o download incremental | todos os publicados, inclusive CEP, nascimento e `GESTOR_CPF` |
+| `data/converted/RD{UF}{AAMM}.parquet` | todas as linhas e colunas do `.dbc`, menos os três campos pessoais | nenhum: sem CEP, sem data de nascimento, sem `GESTOR_CPF` |
 | `data/trusted/trusted_internacoes.parquet` | só hospitais da Baixada Santista, 17 colunas | nenhum: sem CEP, sem data de nascimento (só idade em anos), sem CPF |
 | `data/database/hospital_data.db` | Star Schema no SQLite, a partir da camada trusted | nenhum, pelos mesmos motivos |
 | `logs/pipeline.log` | etapas, contagens e erros | nenhum valor de registro, só totais |
