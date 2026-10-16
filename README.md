@@ -255,4 +255,4 @@ Ministério da Saúde / DATASUS. Sistema de Informações Hospitalares do SUS (S
 
 ## Autor
 
-[Seu nome] · [LinkedIn] · [GitHub]
+Matheus Cavalcante · [GitHub](https://github.com/MatheusCavalcanteF)
