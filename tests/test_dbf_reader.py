@@ -128,6 +128,16 @@ class TestEncoding:
         assert read_dbf(dbf_path)["AUD_JUST"].tolist() == ["Nº 167"]
         assert "sem code page conhecida (LDID 0x00)" in caplog.text
 
+    def test_byte_indefinido_na_code_page_nao_se_perde(self, dbf_path):
+        # Como no AP_CNSPCN do AD do SIA: LDID 0x57 (cp1252) e o byte 0x81, que o cp1252 não define
+        raw = b"\x82{\x81~|\x84"
+        fields = (("AP_CNSPCN", "C", 6, 0),)
+        dbf_path.write_bytes(build_dbf([(raw,)], fields=fields, ldid=0x57))
+        value = read_dbf(dbf_path)["AP_CNSPCN"].tolist()[0]
+        assert value == "‚{\x81~|„"  # 0x82 e 0x84 existem no cp1252 (‚ „); 0x81 vira U+0081
+        # Todo byte original pode ser recuperado
+        assert bytes(0x81 if ch == "\x81" else ch.encode("cp1252")[0] for ch in value) == raw
+
     def test_ldid_0x58_dos_st_antigos_e_cp1252(self, dbf_path):
         dbf_path.write_bytes(build_dbf([("AÇÃO".encode("cp1252"),)], fields=AUD_JUST, ldid=0x58))
         assert read_dbf(dbf_path)["AUD_JUST"].tolist() == ["AÇÃO"]
