@@ -9,10 +9,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from src import extract
-from src.dbf_reader import DBFFormatError, read_dbf
+from src.dbf_reader import DBFFormatError, read_dbf, read_dbf_bytes
 
 # Dois campos no layout do RD: N_AIH (texto, 13) e DIAS_PERM (numérico, 4)
 FIELDS = (("N_AIH", "C", 13, 0), ("DIAS_PERM", "N", 4, 0))
+LDID_CP850 = 0x02  # code page que os RD do SIH declaram no cabeçalho
 
 
 def build_dbf(
@@ -20,18 +21,22 @@ def build_dbf(
     deleted: frozenset[int] = frozenset(),
     declared: int | None = None,
     fields: tuple[tuple[str, str, int, int], ...] = FIELDS,
+    ldid: int = LDID_CP850,
 ) -> bytes:
-    """Monta um dBase III mínimo; `declared` permite mentir no número de registros do cabeçalho."""
+    """Monta um dBase III mínimo; `declared` permite mentir no número de registros do cabeçalho.
+
+    Valores bytes entram crus; os demais são codificados em cp850, como nos RD.
+    """
     record_len = 1 + sum(length for _, _, length, _ in fields)
     header_len = 32 + 32 * len(fields) + 1
     n_declared = len(rows) if declared is None else declared
-    header = struct.pack("<B3sIHH20x", 0x03, b"\x7e\x01\x01", n_declared, header_len, record_len)
+    header = struct.pack("<B3sIHH17xB2x", 0x03, b"\x7e\x01\x01", n_declared, header_len, record_len, ldid)
     for name, kind, length, decimals in fields:
         header += struct.pack("<11sc4xBB14x", name.encode(), kind.encode(), length, decimals)
     header += b"\x0d"
 
     def encode(value: object, kind: str, length: int) -> bytes:
-        text = str(value).encode()
+        text = value if isinstance(value, bytes) else str(value).encode("cp850")
         return text.rjust(length) if kind == "N" else text.ljust(length)
 
     body = b"".join(
@@ -89,17 +94,41 @@ class TestEstruturaDoDbf:
         with pytest.raises(DBFFormatError, match="1 registro"):
             read_dbf(dbf_path)
 
+    def test_leitura_em_memoria_igual_a_do_arquivo(self, dbf_path):
+        raw = build_dbf(ROWS, deleted=frozenset({1}))
+        dbf_path.write_bytes(raw)
+        assert read_dbf_bytes(raw, dbf_path.name).equals(read_dbf(dbf_path))
+
+
+# Texto real de AUD_JUST nos RD: "ç" é 0x87 em cp850 e caractere de controle em latin-1
+AUD_JUST = (("AUD_JUST", "C", 20, 0),)
+
+
+class TestEncoding:
+    def test_usa_a_code_page_do_cabecalho(self, dbf_path):
+        dbf_path.write_bytes(build_dbf([("INFORMAÇÃO úé",)], fields=AUD_JUST))
+        assert read_dbf(dbf_path)["AUD_JUST"].tolist() == ["INFORMAÇÃO úé"]
+
+    def test_cp1252_declarado_no_cabecalho(self, dbf_path):
+        dbf_path.write_bytes(build_dbf([("AÇÃO".encode("cp1252"),)], fields=AUD_JUST, ldid=0x03))
+        assert read_dbf(dbf_path)["AUD_JUST"].tolist() == ["AÇÃO"]
+
+    def test_sem_code_page_le_latin1_e_avisa(self, dbf_path, caplog):
+        dbf_path.write_bytes(build_dbf([("AÇÃO".encode("latin-1"),)], fields=AUD_JUST, ldid=0x00))
+        assert read_dbf(dbf_path)["AUD_JUST"].tolist() == ["AÇÃO"]
+        assert "sem code page conhecida (LDID 0x00)" in caplog.text
+
+    def test_encoding_explicito_prevalece_sobre_o_cabecalho(self, dbf_path):
+        dbf_path.write_bytes(build_dbf([("AÇÃO".encode("latin-1"),)], fields=AUD_JUST))
+        assert read_dbf(dbf_path, encoding="latin-1")["AUD_JUST"].tolist() == ["AÇÃO"]
+
 
 class TestConversaoDoExtract:
     @pytest.fixture
     def fake_decompress(self, monkeypatch):
         """Substitui o datasus-dbc: o "descompactado" é o conteúdo definido pelo teste."""
         content: dict[str, bytes] = {}
-
-        def _decompress(src: str, dest: str) -> None:
-            Path(dest).write_bytes(content["dbf"])
-
-        monkeypatch.setattr(extract.datasus_dbc, "decompress", _decompress)
+        monkeypatch.setattr(extract.datasus_dbc, "decompress_bytes", lambda dbc: content["dbf"])
         return content
 
     def test_dbf_valido_vira_parquet_com_as_mesmas_linhas(self, tmp_path, fake_decompress):
@@ -125,6 +154,21 @@ class TestConversaoDoExtract:
         assert parquet.read_bytes() == before
         assert sorted(p.name for p in converted.iterdir()) == ["RDSP9901.parquet"]
 
+    def test_parquet_de_versao_anterior_e_reconvertido_sem_force(self, tmp_path, fake_decompress, monkeypatch):
+        # Os Parquets da versão 1 têm texto decodificado como latin-1 e precisam sair do cache
+        fake_decompress["dbf"] = build_dbf([("INFORMAÇÃO",)], fields=AUD_JUST)
+        dbc = tmp_path / "RDSP9901.dbc"
+        dbc.write_bytes(b"dbc")
+        converted = tmp_path / "converted"
+        with monkeypatch.context() as m:
+            m.setattr(extract, "CONVERSION_VERSION", "1")
+            extract.convert_dbc_to_parquet(dbc, converted)
+
+        novo = extract.convert_dbc_to_parquet(dbc, converted)
+        table = pq.read_table(novo)
+        assert table.schema.metadata[b"conversion_version"] == extract.CONVERSION_VERSION.encode()
+        assert table.column("AUD_JUST").to_pylist() == ["INFORMAÇÃO"]
+
 
 # Layout com os campos pessoais que o RD publica, nas posições reais (CEP e NASC antes de SEXO)
 FIELDS_PESSOAIS = (
@@ -145,7 +189,7 @@ class TestMinimizacaoDeDadosPessoais:
     @pytest.fixture
     def dbc(self, tmp_path, monkeypatch) -> Path:
         dbf = build_dbf(ROWS_PESSOAIS, fields=FIELDS_PESSOAIS)
-        monkeypatch.setattr(extract.datasus_dbc, "decompress", lambda src, dest: Path(dest).write_bytes(dbf))
+        monkeypatch.setattr(extract.datasus_dbc, "decompress_bytes", lambda dbc: dbf)
         path = tmp_path / "RDSP9901.dbc"
         path.write_bytes(b"dbc")
         return path

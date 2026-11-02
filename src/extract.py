@@ -35,7 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config import CONVERTED_DIR, RAW_DIR
-from src.dbf_reader import read_dbf
+from src.dbf_reader import read_dbf_bytes
 from src.log_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,11 @@ SIH_FIRST_MONTH = date(2008, 1, 1)  # a pasta 200801_ começa em jan/2008
 FTP_TIMEOUT_S = 120
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_S = 5  # espera 5s, 10s e 20s entre as tentativas
-DBF_ENCODING = "latin-1"
+
+# Versão da conversão gravada nos metadados do Parquet. Mudar o valor reconverte
+# os Parquets antigos sem --forcar.
+#   2: texto pela code page do cabeçalho (cp850 nos RD); a 1 usava latin-1 fixo
+CONVERSION_VERSION = "2"
 
 DEFAULT_UF = "SP"
 
@@ -250,18 +254,20 @@ def _parquet_is_current(parquet_path: Path, source: dict[bytes, bytes]) -> bool:
 
 
 def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) -> Path:
-    """Converte .dbc -> .dbf (datasus-dbc) -> .parquet (pyarrow).
+    """Converte .dbc -> .dbf (datasus-dbc, em memória) -> .parquet (pyarrow).
 
-    O .dbf intermediário (~9x maior que o .dbc) é apagado ao final. O Parquet
-    guarda nos metadados o tamanho e a data do .dbc de origem, que servem para
-    pular a conversão quando nada mudou.
+    A descompressão usa decompress_bytes: o decompress do datasus-dbc 0.1.3 lê o
+    .dbc sem buffer e leva ~45s por RDSP, contra ~1,5s em memória. O .dbf (~9x
+    maior que o .dbc) fica só na RAM. O Parquet guarda nos metadados o tamanho e
+    a data do .dbc de origem e a CONVERSION_VERSION, que servem para pular a
+    conversão quando nada mudou.
 
     As colunas de PERSONAL_DATA_COLUMNS ficam fora do Parquet. A lista também
     vai para os metadados, então um Parquet gravado com outra lista (ou antes
     dela existir) é reconvertido na execução seguinte.
 
     Como o FTP não tem TLS nem hash publicado, a conferência de tamanho do
-    download não basta: o read_dbf valida a estrutura do .dbf descompactado
+    download não basta: o read_dbf_bytes valida a estrutura do .dbf descompactado
     (registros declarados no cabeçalho x tamanho do arquivo) e o Parquet só
     substitui o anterior se tiver o mesmo número de linhas lidas.
 
@@ -274,19 +280,20 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
     source = {
         **_source_metadata(dbc_path),
         b"dropped_personal_columns": ",".join(PERSONAL_DATA_COLUMNS).encode(),
+        b"conversion_version": CONVERSION_VERSION.encode(),
     }
 
     if not force and _parquet_is_current(parquet_path, source):
         logger.info("%s já corresponde ao .dbc atual; conversão ignorada", parquet_path.name)
         return parquet_path
 
-    dbf_path = dest_dir / f"{dbc_path.stem}.dbf"
     part_path = parquet_path.with_name(parquet_path.name + ".part")
     logger.info("Convertendo %s para Parquet...", dbc_path.name)
     started = time.perf_counter()
     try:
-        datasus_dbc.decompress(str(dbc_path), str(dbf_path))
-        df = read_dbf(dbf_path, encoding=DBF_ENCODING)
+        dbf_bytes = datasus_dbc.decompress_bytes(dbc_path.read_bytes())
+        df = read_dbf_bytes(dbf_bytes, f"{dbc_path.stem}.dbf")
+        del dbf_bytes  # ~180 MB por RDSP; o DataFrame já tem uma cópia decodificada
         dropped = [col for col in PERSONAL_DATA_COLUMNS if col in df.columns]
         df = df.drop(columns=dropped)
         logger.info("%s: campos pessoais descartados: %s", dbc_path.name, ", ".join(dropped) or "nenhum")
@@ -300,7 +307,6 @@ def convert_dbc_to_parquet(dbc_path: Path, dest_dir: Path, force: bool = False) 
             raise ConversionError(f"{parquet_path.name}: gravadas {written:,} de {len(df):,} linhas lidas do .dbf")
         part_path.replace(parquet_path)
     finally:
-        dbf_path.unlink(missing_ok=True)
         part_path.unlink(missing_ok=True)
 
     logger.info(

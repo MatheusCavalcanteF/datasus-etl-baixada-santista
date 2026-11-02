@@ -43,7 +43,7 @@ flowchart LR
 
 | Etapa | Tecnologia | Responsabilidade |
 |---|---|---|
-| **Extract** (`src/extract.py`) | `ftplib`, `datasus-dbc`, `numpy`, `pyarrow` | Download incremental com novas tentativas; conversão `.dbc` → `.dbf` → Parquet com metadados de origem, já sem CEP, data de nascimento e CPF do gestor |
+| **Extract** (`src/extract.py`) | `ftplib`, `datasus-dbc`, `numpy`, `pyarrow` | Download incremental com novas tentativas; conversão `.dbc` → `.dbf` (em memória) → Parquet com metadados de origem, já sem CEP, data de nascimento e CPF do gestor |
 | **Transform** (`src/transform.py`) | `pandas`, `pyarrow` | Recorte geográfico, tipagem, decodificação pelas tabelas oficiais do TabWin, regras de nulos e contrato de dados |
 | **Load** (`src/load.py`) | `sqlite3`, `pandas` | Star Schema com PK, FK, CHECK e UNIQUE, carga atômica e conciliação antes do commit |
 | **Visualização** | Power BI + DAX | Medidas com regra de negócio do SUS (`powerbi/dax_measures.md`) |
@@ -104,12 +104,13 @@ Decisões de modelagem:
 Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF fora do padrão (sem o byte `0x0D` de terminação), e o `dbfread` quebra ao lê-los.
 
 **Solução.**
-- A descompressão usa o `datasus-dbc`, que tem versão pronta para Windows.
+- A descompressão usa o `datasus-dbc`, que tem versão pronta para Windows, e é feita em memória (`decompress_bytes`). O `decompress`, que grava o `.dbf` em disco, lê o `.dbc` sem buffer e leva ~45 s por arquivo de SP; em memória leva ~1,5 s, com saída idêntica byte a byte.
 - A leitura do DBF usa um leitor próprio e vetorizado (`src/dbf_reader.py`). Ele trata o arquivo como uma matriz de bytes de largura fixa e calcula o número de campos pelo tamanho declarado do cabeçalho, sem depender do terminador.
   ```python
   n_records, header_len, record_len = struct.unpack("<IHH", raw[4:12].tobytes())
   records = raw[header_len : header_len + n_records * record_len].reshape(n_records, record_len)
   ```
+- **Encoding:** o texto é decodificado pela code page que o cabeçalho declara (byte 29, LDID). Os RD declaram cp850, não latin-1: lido como latin-1, o "ç" de `AUD_JUST` (byte `0x87`) virava um caractere de controle.
 - **Download incremental:** o DATASUS republica os últimos 12 meses todo mês. O extract compara tamanho e data de modificação (`SIZE`/`MDTM`) do FTP com a cópia local e só baixa o que mudou.
 - **Conversão incremental:** cada Parquet guarda nos metadados a versão do `.dbc` de origem, e só é reconvertido se ela mudar.
 - **Falhas de rede:** 4 tentativas com espera crescente. Os arquivos são gravados como `.part` e só ganham o nome final depois de conferido o tamanho.
@@ -117,7 +118,7 @@ Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF f
 
 **Resultado.**
 - O leitor é **4x mais rápido que o `dbfread`** lendo todas as colunas (8 s contra 33 s) e **~35x mais rápido** lendo só as colunas usadas.
-- A saída foi conferida contra o `dbfread`: as 253.910 linhas × 114 colunas ficaram idênticas.
+- A saída foi conferida contra o `dbfread` lendo com o mesmo encoding: as 253.910 linhas × 114 colunas ficaram idênticas.
 - Uma nova execução sem novidades no FTP termina em ~3 s.
 
 ### 2. Carga idempotente e com integridade referencial
