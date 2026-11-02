@@ -117,7 +117,9 @@ Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF f
 - **Meses que faltam no FTP:** um mês ainda não publicado é tratado como algo normal. Já um mês faltando no meio da série gera alerta.
 
 **Resultado.**
-- O leitor é **4x mais rápido que o `dbfread`** lendo todas as colunas (8 s contra 33 s) e **~35x mais rápido** lendo só as colunas usadas.
+- O leitor é **~3x mais rápido que o `dbfread`** lendo todas as colunas (10–12 s contra 31–33 s) e usa **~5x menos memória** (pico de 0,7 GB contra 4 GB). Lendo só as 12 colunas que o pipeline usa, leva ~1,2 s; o `dbfread` não lê colunas parciais e leva os mesmos 31–33 s.
+  - Medição: `RDSP2501` e `RDSP2505` (167 e 182 MB, ~250 mil linhas), mediana de 5 execuções com o arquivo em cache, um processo por leitor; Python 3.14, pandas 3.0.6, Windows 11.
+  - A conversão inteira de um mês de SP (descompressão + leitura + Parquet) leva ~21 s.
 - A saída foi conferida contra o `dbfread` lendo com o mesmo encoding: as 253.910 linhas × 114 colunas ficaram idênticas.
 - Uma nova execução sem novidades no FTP termina em ~3 s.
 
