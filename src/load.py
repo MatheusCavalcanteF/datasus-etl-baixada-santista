@@ -2,8 +2,8 @@
 
 Tabelas:
     Dim_Municipio    municípios de residência dos pacientes (e dos hospitais)
-    Dim_Hospital     estabelecimentos (CNES), com o município onde ficam
-    Dim_CID          diagnósticos principais (CID-10)
+    Dim_Hospital     estabelecimentos (CNES), com nome e o município onde ficam
+    Dim_CID          diagnósticos principais (CID-10), com descrição, categoria e capítulo
     Dim_Tempo        calendário contínuo em anos completos, como o Power BI exige
     Fato_Internacao  uma linha por AIH processada (ver src/transform.py)
 
@@ -15,6 +15,9 @@ podendo deixar dimensões novas com um fato antigo.
 
 O SQLite não tem tipo data: as datas são gravadas como texto ISO (AAAA-MM-DD)
 em colunas declaradas DATE, para o driver ODBC poder reconhecê-las como data.
+
+Nomes de hospitais e descrições de CID vêm de data/reference/ (python -m src.reference).
+Sem esses arquivos a carga continua, com os campos nulos e um aviso no log.
 
 Uso, a partir da raiz do projeto:
     python -m src.load
@@ -31,8 +34,9 @@ from typing import Any
 
 import pandas as pd
 
-from src.config import BAIXADA_SANTISTA, DATABASE_PATH, TRUSTED_DIR
+from src.config import BAIXADA_SANTISTA, DATABASE_PATH, REFERENCE_DIR, TRUSTED_DIR
 from src.log_config import setup_logging
+from src.reference import CID10_PATH, HOSPITALS_PATH
 from src.transform import KEY_COLUMNS, TIPO_AIH_NORMAL
 
 logger = logging.getLogger(__name__)
@@ -70,8 +74,12 @@ SCHEMA: dict[str, str] = {
         )""",
     "Dim_CID": """
         CREATE TABLE Dim_CID (
-            id_cid        TEXT PRIMARY KEY,
-            descricao_cid TEXT
+            id_cid              TEXT PRIMARY KEY,
+            descricao_cid       TEXT,
+            id_categoria        TEXT,
+            descricao_categoria TEXT,
+            numero_capitulo     INTEGER,
+            capitulo            TEXT
         )""",
     "Dim_Tempo": """
         CREATE TABLE Dim_Tempo (
@@ -145,8 +153,16 @@ def build_dim_municipio(df: pd.DataFrame) -> pd.DataFrame:
     return dim
 
 
-def build_dim_hospital(df: pd.DataFrame) -> pd.DataFrame:
-    """Um CNES por linha. nome_hospital fica nulo até integrarmos a API do CNES."""
+def read_reference(path: Path, description: str) -> pd.DataFrame | None:
+    """Lê um arquivo de data/reference/; se ele não existir, a carga segue com os campos nulos."""
+    if not path.exists():
+        logger.warning("%s não existe: %s ficam nulos (rode python -m src.reference)", path, description)
+        return None
+    return pd.read_parquet(path)
+
+
+def build_dim_hospital(df: pd.DataFrame, hospitals: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Um CNES por linha, com o nome que a API do CNES devolveu (nulo sem o cache)."""
     locations = df[["id_hospital", "id_municipio"]].drop_duplicates()
     multi = locations["id_hospital"].duplicated(keep=False)
     if multi.any():
@@ -159,16 +175,67 @@ def build_dim_hospital(df: pd.DataFrame) -> pd.DataFrame:
             .sort_values("n", ascending=False).drop_duplicates("id_hospital")
         )
     dim = locations.rename(columns={"id_municipio": "id_municipio_hospital"}).sort_values("id_hospital")
-    dim["nome_hospital"] = None
     dim["municipio_hospital"] = dim["id_municipio_hospital"].map(BAIXADA_SANTISTA)
+    if hospitals is None:
+        dim["nome_hospital"] = None
+    else:
+        dim = dim.merge(hospitals[["id_hospital", "nome_hospital", "id_municipio_cnes"]], on="id_hospital", how="left")
+        # O SIH e o CNES precisam concordar sobre onde fica o hospital
+        moved = dim["id_municipio_cnes"].notna() & (dim["id_municipio_cnes"] != dim["id_municipio_hospital"])
+        if moved.any():
+            logger.warning(
+                "Município do CNES difere do SIH em %d hospital(is): %s",
+                int(moved.sum()),
+                dim.loc[moved, ["id_hospital", "id_municipio_hospital", "id_municipio_cnes"]].to_dict("records"),
+            )
+        _log_coverage("Dim_Hospital", "hospital(is) com nome", int(dim["nome_hospital"].notna().sum()), len(dim))
     return dim[["id_hospital", "nome_hospital", "id_municipio_hospital", "municipio_hospital"]]
 
 
-def build_dim_cid(df: pd.DataFrame) -> pd.DataFrame:
-    """CIDs distintos. descricao_cid fica nula até integrarmos a tabela CID-10 do DATASUS."""
+def build_dim_cid(df: pd.DataFrame, cid10: pd.DataFrame | None = None) -> pd.DataFrame:
+    """CIDs distintos, com descrição, categoria e capítulo da tabela CID-10 do DATASUS.
+
+    A tabela é a de 2008. Subcategorias criadas depois (ex.: N18.2, estágio da
+    doença renal crônica) ficam com a descrição da categoria e uma nota.
+    """
     dim = pd.DataFrame({"id_cid": sorted(df["id_cid"].dropna().unique())})
-    dim["descricao_cid"] = None
-    return dim
+    if cid10 is None:
+        for col in ("descricao_cid", "id_categoria", "descricao_categoria", "numero_capitulo", "capitulo"):
+            dim[col] = None
+        return dim
+
+    dim = dim.merge(cid10[["id_cid", "descricao_cid"]], on="id_cid", how="left")
+    dim["id_categoria"] = dim["id_cid"].str[:3]
+    categories = cid10.loc[cid10["id_cid"].str.len() == 3, ["id_cid", "descricao_cid", "numero_capitulo", "capitulo"]]
+    dim = dim.merge(
+        categories.rename(columns={"id_cid": "id_categoria", "descricao_cid": "descricao_categoria"}),
+        on="id_categoria",
+        how="left",
+    )
+
+    exact = int(dim["descricao_cid"].notna().sum())
+    by_category = dim["descricao_cid"].isna() & dim["descricao_categoria"].notna()
+    dim.loc[by_category, "descricao_cid"] = (
+        dim.loc[by_category, "descricao_categoria"]
+        + " (subcategoria "
+        + dim.loc[by_category, "id_cid"]
+        + " ausente da tabela CID-10 de 2008)"
+    )
+    dim.loc[dim["descricao_categoria"].isna(), "id_categoria"] = None  # categoria inexistente na tabela
+    _log_coverage("Dim_CID", "CID(s) com descrição", int(dim["descricao_cid"].notna().sum()), len(dim))
+    if by_category.any():
+        logger.info(
+            "Dim_CID: %s com descrição exata; %d pela categoria: %s",
+            _fmt(exact),
+            int(by_category.sum()),
+            dim.loc[by_category, "id_cid"].tolist(),
+        )
+    return dim[["id_cid", "descricao_cid", "id_categoria", "descricao_categoria", "numero_capitulo", "capitulo"]]
+
+
+def _log_coverage(table: str, what: str, found: int, total: int) -> None:
+    log = logger.info if found == total else logger.warning
+    log("%s: %s de %s %s", table, _fmt(found), _fmt(total), what)
 
 
 def build_dim_tempo(df: pd.DataFrame) -> pd.DataFrame:
@@ -270,14 +337,21 @@ def validate_load(conn: sqlite3.Connection, trusted: pd.DataFrame) -> None:
     )
 
 
-def load(trusted_path: Path = TRUSTED_PATH, db_path: Path = DATABASE_PATH) -> dict[str, int]:
+def load(
+    trusted_path: Path = TRUSTED_PATH,
+    db_path: Path = DATABASE_PATH,
+    reference_dir: Path | None = None,
+) -> dict[str, int]:
     """Recria o Star Schema no SQLite. Retorna as linhas inseridas por tabela."""
     started = time.perf_counter()
+    reference_dir = reference_dir or REFERENCE_DIR
     trusted = read_trusted(trusted_path)
+    hospitals = read_reference(reference_dir / HOSPITALS_PATH.name, "os nomes dos hospitais")
+    cid10 = read_reference(reference_dir / CID10_PATH.name, "as descrições de CID")
     tables = {
         "Dim_Municipio": build_dim_municipio(trusted),
-        "Dim_Hospital": build_dim_hospital(trusted),
-        "Dim_CID": build_dim_cid(trusted),
+        "Dim_Hospital": build_dim_hospital(trusted, hospitals),
+        "Dim_CID": build_dim_cid(trusted, cid10),
         "Dim_Tempo": build_dim_tempo(trusted),
         "Fato_Internacao": build_fato_internacao(trusted),
     }

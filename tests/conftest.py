@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from src import transform
+from src import load, transform
 
 RawRow = dict[str, Any]
 
@@ -66,6 +66,14 @@ def write_converted(rows: list[RawRow], directory: Path) -> Path:
 @pytest.fixture
 def trusted_path(tmp_path: Path) -> Path:
     return tmp_path / "trusted.parquet"
+
+
+@pytest.fixture(autouse=True)
+def reference_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Pasta de referência vazia: o load nunca lê o data/reference/ de verdade nos testes."""
+    path = tmp_path / "reference"
+    monkeypatch.setattr(load, "REFERENCE_DIR", path)
+    return path
 
 
 @pytest.fixture

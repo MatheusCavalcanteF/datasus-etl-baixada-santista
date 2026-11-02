@@ -38,6 +38,8 @@ flowchart LR
     RAW -->|"datasus-dbc + leitor DBF em numpy"| CONV["data/converted<br/>Parquet · SP inteiro"]
     CONV -->|"pandas · filtro Baixada · contrato de dados"| TRUST["data/trusted<br/>trusted_internacoes.parquet"]
     TRUST -->|"sqlite3 · transação única · PK/FK"| DB[("SQLite<br/>Star Schema")]
+    API[("API CNES · CID-10 DATASUS")] -->|"urllib · cache · SHA-256"| REF["data/reference<br/>nomes e descrições"]
+    REF --> DB
     DB -->|"ODBC"| PBI["Power BI<br/>medidas DAX"]
 ```
 
@@ -45,6 +47,7 @@ flowchart LR
 |---|---|---|
 | **Extract** (`src/extract.py`) | `ftplib`, `datasus-dbc`, `numpy`, `pyarrow` | Download incremental com novas tentativas; conversão `.dbc` → `.dbf` (em memória) → Parquet com metadados de origem, já sem CEP, data de nascimento e CPF do gestor |
 | **Transform** (`src/transform.py`) | `pandas`, `pyarrow` | Recorte geográfico, tipagem, decodificação pelas tabelas oficiais do TabWin, regras de nulos e contrato de dados |
+| **Referência** (`src/reference.py`) | `urllib`, `pandas` | Nomes dos hospitais pela API de dados abertos do CNES (só os CNES novos) e tabela CID-10 do DATASUS com categoria e capítulo, conferida por SHA-256 |
 | **Load** (`src/load.py`) | `sqlite3`, `pandas` | Star Schema com PK, FK, CHECK e UNIQUE, carga atômica e conciliação antes do commit |
 | **Visualização** | Power BI + DAX | Medidas com regra de negócio do SUS (`powerbi/dax_measures.md`) |
 
@@ -71,6 +74,7 @@ erDiagram
     }
     Dim_Hospital {
         text id_hospital PK "CNES"
+        text nome_hospital
         text municipio_hospital
     }
     Dim_Municipio {
@@ -80,6 +84,9 @@ erDiagram
     }
     Dim_CID {
         text id_cid PK "CID-10"
+        text descricao_cid
+        text descricao_categoria
+        text capitulo
     }
     Dim_Tempo {
         date data PK
@@ -185,13 +192,15 @@ pip install -r requirements.txt
 
 python -m src.extract           # baixa e converte (padrão: ano anterior + ano atual)
 python -m src.transform         # recorte da Baixada Santista e regras de negócio
+python -m src.reference         # nomes dos hospitais (API do CNES) e tabela CID-10
 python -m src.load              # Star Schema em data/database/hospital_data.db
 
-pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
+pytest tests/                   # 58 testes, ~5 s, sem acesso à rede
 ```
 
 - Rode sempre a partir da raiz, com `python -m`.
-- A primeira extração leva ~50 s por mês de SP. As seguintes só baixam o que o DATASUS republicou.
+- A conversão leva ~20 s por mês de SP, fora o download. As execuções seguintes só baixam o que o DATASUS republicou.
+- O `src.reference` só consulta a API do CNES para hospitais que ainda não estão no cache (24 hospitais: ~6 s na primeira vez). Sem ele, o load roda do mesmo jeito, com nomes e descrições nulos. `--forcar` consulta e baixa tudo de novo.
 - Opções do extract: `--inicio AAAA-MM`, `--fim AAAA-MM`, `--uf` e `--forcar` (ignora o cache).
 - Meses ainda não publicados são pulados e entram sozinhos na primeira execução depois de publicados.
 
@@ -209,11 +218,13 @@ pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
 │   ├── dbf_reader.py     # leitor DBF vetorizado (numpy)
 │   ├── extract.py        # FTP → .dbc → Parquet
 │   ├── transform.py      # regras de negócio e contrato de dados
+│   ├── reference.py      # nomes de hospitais (API do CNES) e tabela CID-10
 │   └── load.py           # Star Schema no SQLite, carga atômica
 ├── tests/
 │   ├── conftest.py       # AIHs sintéticas no layout do DATASUS
 │   ├── test_dbf_reader.py # validação do .dbf, encoding, casos de borda, propriedade x dbfread e minimização
 │   ├── test_transform.py # chave única, filtro geográfico, dias de permanência
+│   ├── test_reference.py # CID-10 e API do CNES sem rede, uso no load
 │   └── test_load.py      # média de permanência no banco, idempotência, rollback
 ├── powerbi/
 │   └── dax_measures.md   # medidas DAX, configuração do modelo e valores de referência
@@ -228,7 +239,7 @@ pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
 
 ## Testes
 
-`pytest tests/` roda 30 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o leitor DBF, a conversão para Parquet, o transform e o load de verdade, em pastas temporárias, sem dados da rede:
+`pytest tests/` roda 58 testes com AIHs sintéticas no mesmo layout dos arquivos do DATASUS. Os testes executam o leitor DBF, a conversão para Parquet, o transform e o load de verdade, em pastas temporárias, sem dados da rede:
 
 - **Chave única:** fatias de longa permanência na mesma competência são mantidas e somadas; cópias exatas bloqueiam a gravação. Os testes usam os números de AIH reais que motivaram a chave.
 - **Filtro geográfico:** só ficam hospitais dos 9 municípios. O filtro é pelo hospital, não pela residência, e rejeita códigos com dígito verificador, truncados ou vazios.
@@ -239,6 +250,7 @@ pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
 - **Média de permanência no banco:** a fórmula da medida DAX dá 24,25 dias num caso calculado à mão, contra 16,2 dias da média simples por linha. Um recorte sem internações devolve nulo, sem erro.
 - **Carga atômica:** a carga é idempotente, e uma falha no meio dela (FK órfã ou validação) mantém o banco anterior.
 - **Integridade do `.dbf`:** arquivo truncado, cabeçalho com menos registros que o arquivo, bytes a mais no final e registro desalinhado são rejeitados, e um `.dbf` inconsistente não substitui o Parquet anterior.
+- **Dados de referência:** a tabela CID-10 é lida com categoria e capítulo, e um arquivo com SHA-256 diferente do oficial é recusado; o cache do CNES só consulta o que falta e grava o que deu certo mesmo quando outro CNES falha; o load preenche nomes e descrições, descreve pela categoria as subcategorias criadas depois de 2008 e segue com campos nulos quando não há dados de referência.
 - **Minimização de dados pessoais:** CEP, data de nascimento e CPF do gestor não chegam ao Parquet convertido, e um Parquet gravado antes dessa regra é reconvertido sozinho.
 
 A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, três bugs no código: a chave antiga, o filtro pela residência e a permanência nula virando zero. Os testes certos falharam nos três casos.
@@ -249,7 +261,7 @@ A suíte também passou por um teste de mutação. Reintroduzi, um de cada vez, 
 - **O valor é o pago pela tabela SIGTAP**, não o custo real do hospital.
 - **Os últimos 3 meses são preliminares** por natureza do SIH. O painel sinaliza isso em vez de esconder.
 - **Taxa de ocupação:** ainda não implementada. Depende dos leitos SUS do CNES e só é possível como estimativa.
-- **Nomes de hospitais e descrições de CID:** as fontes estão mapeadas e testadas (API de dados abertos do CNES e tabela CID-10 do DATASUS), mas ainda não foram integradas.
+- **Nomes de hospitais e descrições de CID:** os nomes vêm da API de dados abertos do CNES, em maiúsculas e sem acento, como a API devolve. A tabela CID-10 é a versão 2008 do DATASUS; 2 CIDs do período (N18.2 e N18.5, 4 AIHs) foram criados depois dela e ficam com a descrição da categoria. O cache do CNES não se atualiza sozinho: um hospital que mudar de nome só aparece com `python -m src.reference --forcar`.
 - **Integridade do download:** o FTP do DATASUS não tem TLS nem publica hash dos arquivos, então não há como provar que o `.dbc` recebido é o publicado. O extract confere o tamanho informado pelo FTP e, depois de descompactar, a estrutura do `.dbf`: o arquivo precisa ter exatamente os registros declarados no cabeçalho, todo registro precisa estar alinhado, e o Parquet só é gravado com o mesmo número de linhas. Isso pega download truncado e arquivo corrompido, mas não um arquivo adulterado de forma consistente no caminho.
 - **Cobertura de testes:** transform, load, leitor DBF e conversão para Parquet estão cobertos. A parte de rede do extract (FTP, novas tentativas, cache) foi validada manualmente durante o desenvolvimento, mas ainda não tem testes automatizados.
 

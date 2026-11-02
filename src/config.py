@@ -8,6 +8,7 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 RAW_DIR: Path = DATA_DIR / "raw"
 CONVERTED_DIR: Path = DATA_DIR / "converted"
 TRUSTED_DIR: Path = DATA_DIR / "trusted"
+REFERENCE_DIR: Path = DATA_DIR / "reference"  # nomes de hospitais (CNES) e tabela CID-10
 DATABASE_PATH: Path = DATA_DIR / "database" / "hospital_data.db"
 
 LOG_DIR: Path = PROJECT_ROOT / "logs"
