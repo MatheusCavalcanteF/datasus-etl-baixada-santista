@@ -16,10 +16,13 @@ binários do FoxPro) levanta DBFFormatError em vez de virar texto sem sentido.
 O encoding do texto sai do byte de idioma do cabeçalho (LDID). Os RD do SIH
 declaram cp850: em latin-1, o "ç" (0x87) de AUD_JUST virava um caractere de controle.
 Os ST do CNES não declaram (LDID 0) e usam latin-1: o "º" de ALVARA é 0xBA.
+A decodificação nunca perde bytes: o AD do SIA declara cp1252 mas guarda em
+AP_CNSPCN um identificador codificado com 0x81, byte que o cp1252 não define.
 """
 
 from __future__ import annotations
 
+import codecs
 import logging
 import struct
 from collections.abc import Iterable
@@ -50,6 +53,19 @@ LDID_ENCODINGS = {
     0x64: "cp852",
 }
 DEFAULT_ENCODING = "latin-1"  # quando o cabeçalho não declara code page (LDID 0) ou declara uma desconhecida
+
+_LOSSLESS_ERRORS = "dbf_reader.lossless"
+
+
+def _byte_as_code_point(error: UnicodeError) -> tuple[str, int]:
+    # Byte sem caractere na code page (0x81 no cp1252) vira o code point de mesmo
+    # número (U+0081), como faz o decodificador windows-1252 do WHATWG
+    if not isinstance(error, UnicodeDecodeError):
+        raise error
+    return error.object[error.start : error.end].decode("latin-1"), error.end
+
+
+codecs.register_error(_LOSSLESS_ERRORS, _byte_as_code_point)
 
 SUPPORTED_TYPES = frozenset("CNFDL")
 _TRUE_VALUES = frozenset("TtYy")
@@ -110,7 +126,8 @@ def _header_encoding(raw: np.ndarray, name: str) -> str:
 
 def _decode_field(records: np.ndarray, field: DBFField, encoding: str) -> pd.Series:
     chunk = np.ascontiguousarray(records[:, field.offset : field.offset + field.length])
-    text = pd.Series(chunk.view(f"S{field.length}").ravel()).str.decode(encoding).str.strip()
+    raw_values = pd.Series(chunk.view(f"S{field.length}").ravel())
+    text = raw_values.str.decode(encoding, errors=_LOSSLESS_ERRORS).str.strip()
 
     if field.type in ("N", "F"):
         # numpy_nullable lê inteiros direto como Int64; passar por float64 perderia
