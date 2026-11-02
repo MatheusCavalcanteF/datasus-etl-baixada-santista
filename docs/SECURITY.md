@@ -34,4 +34,4 @@ Fora do escopo: a infraestrutura do DATASUS (FTP sem TLS, ausência de hash publ
 | `data/database/hospital_data.db` | Star Schema no SQLite, a partir da camada trusted | nenhum, pelos mesmos motivos |
 | `logs/pipeline.log` | etapas, contagens e erros | nenhum valor de registro, só totais |
 
-Os arquivos intermediários (`.part` do download, da conversão e do transform, e o `.dbf` descompactado) são apagados ao final de cada etapa, inclusive em caso de erro.
+Os arquivos intermediários (`.part` do download, da conversão e do transform) são apagados ao final de cada etapa, inclusive em caso de erro. O `.dbf` descompactado fica só na memória e não chega ao disco.

@@ -10,6 +10,9 @@ Usado no lugar do dbfread por dois motivos verificados com arquivos reais do DAT
 Os tipos seguem o mesmo critério do dbfread: campos N/F viram números (inteiro
 anulável quando não há casas decimais), D vira data e o resto vira texto sem os
 espaços de preenchimento.
+
+O encoding do texto sai do byte de idioma do cabeçalho (LDID). Os RD do SIH
+declaram cp850: em latin-1, o "ç" (0x87) de AUD_JUST virava um caractere de controle.
 """
 
 from __future__ import annotations
@@ -32,6 +35,17 @@ _EOF_MARKER = 0x1A  # opcional no dBase; os RD do DATASUS terminam sem ele
 _ACTIVE_FLAG = ord(" ")
 _DELETED_FLAG = ord("*")
 _MAX_INT64_DIGITS = 18
+_LDID_OFFSET = 29  # byte do cabeçalho com o "language driver" (code page do texto)
+
+# LDIDs do dBase/FoxPro que aparecem em arquivos brasileiros
+LDID_ENCODINGS = {
+    0x01: "cp437",
+    0x02: "cp850",
+    0x03: "cp1252",
+    0x57: "cp1252",
+    0x64: "cp852",
+}
+DEFAULT_ENCODING = "latin-1"  # quando o cabeçalho não declara code page (LDID 0) ou declara uma desconhecida
 
 
 class DBFFormatError(ValueError):
@@ -67,6 +81,20 @@ def _parse_fields(raw: np.ndarray, header_len: int, record_len: int) -> list[DBF
     return fields
 
 
+def _header_encoding(raw: np.ndarray, name: str) -> str:
+    ldid = int(raw[_LDID_OFFSET])
+    encoding = LDID_ENCODINGS.get(ldid)
+    if encoding is None:
+        logger.warning(
+            "%s: cabeçalho sem code page conhecida (LDID 0x%02X); texto lido como %s",
+            name,
+            ldid,
+            DEFAULT_ENCODING,
+        )
+        return DEFAULT_ENCODING
+    return encoding
+
+
 def _decode_field(records: np.ndarray, field: DBFField, encoding: str) -> pd.Series:
     chunk = np.ascontiguousarray(records[:, field.offset : field.offset + field.length])
     text = pd.Series(chunk.view(f"S{field.length}").ravel()).str.decode(encoding).str.strip()
@@ -91,10 +119,22 @@ def _decode_field(records: np.ndarray, field: DBFField, encoding: str) -> pd.Ser
 def read_dbf(
     path: Path,
     columns: Iterable[str] | None = None,
-    encoding: str = "latin-1",
+    encoding: str | None = None,
 ) -> pd.DataFrame:
-    """Lê um arquivo .dbf para DataFrame, opcionalmente só com as colunas pedidas.
+    """Lê um arquivo .dbf para DataFrame. Detalhes em read_dbf_bytes."""
+    return _read(np.fromfile(path, dtype=np.uint8), path.name, columns, encoding)
 
+
+def read_dbf_bytes(
+    data: bytes,
+    name: str,
+    columns: Iterable[str] | None = None,
+    encoding: str | None = None,
+) -> pd.DataFrame:
+    """Lê um .dbf já em memória (ex.: saída do datasus_dbc.decompress_bytes) para DataFrame.
+
+    `name` só identifica o arquivo nas mensagens. Sem `encoding`, o texto é
+    decodificado pela code page declarada no cabeçalho (LDID_ENCODINGS).
     Registros marcados como excluídos são descartados.
 
     O FTP do DATASUS não publica hash dos arquivos, então a integridade é conferida
@@ -107,9 +147,18 @@ def read_dbf(
             registros desalinhados ou campos inconsistentes.
         KeyError: alguma coluna pedida não existe no arquivo.
     """
-    raw = np.fromfile(path, dtype=np.uint8)
+    return _read(np.frombuffer(data, dtype=np.uint8), name, columns, encoding)
+
+
+def _read(
+    raw: np.ndarray,
+    name: str,
+    columns: Iterable[str] | None,
+    encoding: str | None,
+) -> pd.DataFrame:
     if raw.size < _HEADER_PREFIX_SIZE:
-        raise DBFFormatError(f"{path.name}: arquivo com {raw.size} bytes, pequeno demais para um DBF")
+        raise DBFFormatError(f"{name}: arquivo com {raw.size} bytes, pequeno demais para um DBF")
+    encoding = encoding or _header_encoding(raw, name)
 
     n_records, header_len, record_len = struct.unpack("<IHH", raw[4:12].tobytes())
     fields = _parse_fields(raw, header_len, record_len)
@@ -117,20 +166,20 @@ def read_dbf(
     data_end = header_len + n_records * record_len
     if raw.size < data_end:
         raise DBFFormatError(
-            f"{path.name}: truncado ({raw.size:,} bytes; o cabeçalho declara {data_end:,})"
+            f"{name}: truncado ({raw.size:,} bytes; o cabeçalho declara {data_end:,})"
         )
     trailing = raw[data_end:]
     if trailing.size > 1 or (trailing.size == 1 and trailing[0] != _EOF_MARKER):
         # Bytes a mais significam registros fora da contagem do cabeçalho, que seriam perdidos
         raise DBFFormatError(
-            f"{path.name}: {trailing.size:,} byte(s) além dos {n_records:,} registros declarados no cabeçalho"
+            f"{name}: {trailing.size:,} byte(s) além dos {n_records:,} registros declarados no cabeçalho"
         )
 
     if columns is not None:
         wanted = set(columns)
         missing = wanted - {f.name for f in fields}
         if missing:
-            raise KeyError(f"{path.name}: colunas inexistentes: {sorted(missing)}")
+            raise KeyError(f"{name}: colunas inexistentes: {sorted(missing)}")
         fields = [f for f in fields if f.name in wanted]
 
     records = raw[header_len:data_end].reshape(n_records, record_len)
@@ -138,10 +187,10 @@ def read_dbf(
     misaligned = int((~deleted & (records[:, 0] != _ACTIVE_FLAG)).sum())
     if misaligned:
         raise DBFFormatError(
-            f"{path.name}: {misaligned:,} registro(s) sem marca de exclusão válida (arquivo corrompido?)"
+            f"{name}: {misaligned:,} registro(s) sem marca de exclusão válida (arquivo corrompido?)"
         )
     if deleted.any():
-        logger.info("%s: %d registro(s) marcado(s) como excluído(s) descartado(s)", path.name, deleted.sum())
+        logger.info("%s: %d registro(s) marcado(s) como excluído(s) descartado(s)", name, deleted.sum())
         records = records[~deleted]
 
     return pd.DataFrame({f.name: _decode_field(records, f, encoding) for f in fields})
