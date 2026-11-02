@@ -260,3 +260,7 @@ Ministério da Saúde / DATASUS. Sistema de Informações Hospitalares do SUS (S
 ## Autor
 
 Matheus Cavalcante · [GitHub](https://github.com/MatheusCavalcanteF)
+
+## Licença
+
+Código sob a licença [MIT](LICENSE). Os dados do DATASUS são públicos e não fazem parte do repositório.
