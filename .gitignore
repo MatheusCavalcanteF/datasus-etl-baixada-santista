@@ -23,3 +23,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Benchmark: leitor do PySUS baixado na primeira execução
+benchmarks/.cache/

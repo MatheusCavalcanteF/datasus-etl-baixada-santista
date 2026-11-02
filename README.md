@@ -101,7 +101,7 @@ Decisões de modelagem:
 - o leitor de `.dbc` dele (`pyreaddbc`) não tem versão pronta para Windows e exige o Visual Studio para compilar;
 - o `fastparquet` não tem versão para Python 3.14.
 
-Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF fora do padrão (sem o byte `0x0D` de terminação), e o `dbfread` quebra ao lê-los.
+Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF fora do padrão (sem o byte `0x0D` de terminação), e o `dbfread` quebra ao lê-los (`ValueError: Unknown field type` no `STAC2609`, conferido em 02/11/2026).
 
 **Solução.**
 - A descompressão usa o `datasus-dbc`, que tem versão pronta para Windows, e é feita em memória (`decompress_bytes`). O `decompress`, que grava o `.dbf` em disco, lê o `.dbc` sem buffer e leva ~45 s por arquivo de SP; em memória leva ~1,5 s, com saída idêntica byte a byte.
@@ -118,7 +118,7 @@ Além disso, os arquivos de estabelecimentos do CNES vêm com o cabeçalho DBF f
 
 **Resultado.**
 - O leitor é **~3x mais rápido que o `dbfread`** lendo todas as colunas (10–12 s contra 31–33 s) e usa **~5x menos memória** (pico de 0,7 GB contra 4 GB). Lendo só as 12 colunas que o pipeline usa, leva ~1,2 s; o `dbfread` não lê colunas parciais e leva os mesmos 31–33 s.
-  - Medição: `RDSP2501` e `RDSP2505` (167 e 182 MB, ~250 mil linhas), mediana de 5 execuções com o arquivo em cache, um processo por leitor; Python 3.14, pandas 3.0.6, Windows 11.
+  - Medição em [`benchmarks/`](benchmarks/README.md), com o script para reproduzir: `RDSP2501` e `RDSP2505` (167 e 182 MB, ~250 mil linhas), mediana de 5 execuções com o arquivo em cache, um processo por leitor; Python 3.14, pandas 3.0.6, Windows 11. A tabela inclui o leitor do PySUS, que tem a mesma velocidade, DuckDB, pyogrio e simpledbf.
   - A conversão inteira de um mês de SP (descompressão + leitura + Parquet) leva ~21 s.
 - A saída foi conferida contra o `dbfread` lendo com o mesmo encoding: as 253.910 linhas × 114 colunas ficaram idênticas.
 - Uma nova execução sem novidades no FTP termina em ~3 s.
@@ -212,11 +212,12 @@ pytest tests/                   # 30 testes, ~1 s, sem acesso à rede
 │   └── load.py           # Star Schema no SQLite, carga atômica
 ├── tests/
 │   ├── conftest.py       # AIHs sintéticas no layout do DATASUS
-│   ├── test_dbf_reader.py # validação do .dbf e minimização dos campos pessoais
+│   ├── test_dbf_reader.py # validação do .dbf, encoding, casos de borda, propriedade x dbfread e minimização
 │   ├── test_transform.py # chave única, filtro geográfico, dias de permanência
 │   └── test_load.py      # média de permanência no banco, idempotência, rollback
 ├── powerbi/
 │   └── dax_measures.md   # medidas DAX, configuração do modelo e valores de referência
+├── benchmarks/           # leitor DBF x PySUS, dbfread, DuckDB etc. (python -m benchmarks.run)
 ├── docs/
 │   └── SECURITY.md       # como reportar vulnerabilidades; dados e LGPD
 ├── data/                 # gerado pelo pipeline (fora do git)
