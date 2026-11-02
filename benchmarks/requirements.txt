@@ -1,0 +1,9 @@
+# Só para o benchmark (python -m benchmarks.run); o pipeline não usa nada disto.
+# Instale junto com o requirements.txt da raiz.
+psutil==7.2.2
+simpledbf==0.2.6
+dbf==0.99.11
+pyogrio==0.13.0
+duckdb==2.0.0
+fastdbf==0.5.2
+# pyreaddbc só tem wheel para Windows até o Python 3.13: pip install pyreaddbc==2.0.4
